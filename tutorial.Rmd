@@ -1,0 +1,125 @@
+---
+title: "Power analyses for microbiome studies"
+output: html_notebook
+bibliography: tutorial.bib
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+---
+
+# Introduction
+
+Power analyses are important for experimental study design so that the researcher has an idea of how many experiment subjects are needed to minimize Type II error. In microbiome studies power analyses can be difficult not just because the true effect size is unknown, but also because the composition of the microbiome in control and experimental groups (i.e. beta diversity) is generally unknown. However, if the study intends to use pairwise distances and PERMANOVA to measure diversity then we can use methods from the R package *micropower* [@Kelly2015] to perform power analyses as long as we have previously available datasets characteristic of one of the groups (most likely the control).
+
+Here at CBC (TODO: add link) we have performed a number of power analyses for researchers wanting to do 16s and whole genome shotgun (which we will refer to as just shotgun from now on) metagenomics experiments. Following is a walkthrough of what such an analysis looks like as well as what you will need to consider for your own power analysis.
+
+## Data {#data}
+
+We will be using data from the Human Microbiome Project for this tutorial [@Methe2012]. The Human Microbiome Project has alleviated some of the difficulty in a lack of accessible and well characterized data by providing 16s and whole genome data on 300 healthy human subjects from the US in multiple tissue types.
+
+In particular we will be 1) using the [HMP1 Metadata Project Catalog](https://www.hmpdacc.org/hmp/catalog/) to find shotgun metagenomics gut samples, and then 2) matching up the SRA IDs of the samples to the abundances table provided in the shotgun community profiling database [HMSCP](https://www.hmpdacc.org/hmp/HMSCP/).
+
+Using methods from the R package *micropower* [@Kelly2015] we can then perform power analyses by computing within-group distance parameters from the HMP project and then using those parameters to simulate pairwise distances and effect sizes for most 16s or metagenomics microbiome studies. This tutorial shows the steps to do so as well as the assumptions made in such an analysis.
+
+# Setting up
+
+This entire analysis can be reproduced with this notebook and the files in the repository. If you don't already have the packages `micropower`, `devtools` installed then execute the commands below to install and load the packages.
+
+```{r, setup, eval=FALSE}
+install.packages('devtools')
+devtools::install_github("brendankelly/micropower")
+library(micropower)
+library(knitr)
+library(kableExtra)
+library(dplyr)
+```
+
+We will assume that you have cloned the entire repository as well and thus have the same path to the data. If not then modify the variable `PATH` to point to the path of the data.
+
+```{r, setup_path}
+PATH='data'
+```
+
+# Idea behind micropower
+
+The basic idea behind `micropower` is to simulate a range of effect sizes, rarefaction curves, etc. (TODO: fill out etc)
+
+# Analysis
+
+## Finding and filtering the data
+
+To start with, we have provided the project catalog from HMP as described in [Data](#data). You can download this yourself on their site by clicking on "HMP metagenomic samples" under *Browse datasets*, clicking on "View Project Catalog" at the bottom, and then clicking on the "Save to CSV" button. From here we filter for samples where the collection site is listed as `gastrointestinal_tract` (gut) and with gene counts greater than 0 (shotgun metagenomics as opposed to 16s) to get a list of SRA IDs. This results in 147 samples.
+
+```{r,get_data}
+# getting sample IDs
+project_catalog<-read.csv(file.path(PATH,"project_catalog.csv"))
+kable(head(project_catalog), caption="A few rows of values and column names in project catalog.") %>% kable_styling()
+
+IDs <- select(project_catalog, Sequence.Read.Archive.ID, HMP.Isolation.Body.Site, Gene.Count) %>%
+  filter(HMP.Isolation.Body.Site=='gastrointestinal_tract' & Gene.Count>0) %>%
+  .$Sequence.Read.Archive.ID
+length(IDs)
+```
+
+With the list of SRA IDs we can then download abundance tables associated with those SRA IDs. Here we have provided them in the Github repo for you, but below is the command you can use to download them using FTP. Note that if you plan to download a large amount of data from the HMP project that they provide a client [Aspera](https://www.hmpdacc.org/hmp/resources/download.php) to do so.
+
+```{r,eval=FALSE}
+lapply(IDs, function(x) download.file(url=paste0("ftp://public-ftp.ihmpdcc.org/HMSCP/",x,"/",x,"_abundance_table.tsv.bz2"),destfile=paste0(x,".tsv.bz2")))
+```
+
+## Within-group distances
+
+To get an abundance table, we take the depth x total number of reference bases x breadth, then divide it by 10000, or the length of the reads (100) x 100, due to the fact that breadth is the proportion of reference bases that were covered and is out of 100. We then join the 147 samples together as columns.
+
+```{r,make_table}
+# 100 is length of reads
+# another 100 is because breadth is out of 100
+test<-lapply(IDs, function(x) read.csv(file.path(PATH,paste0(x,'.tsv')),sep='\t') %>% transmute(Reference.Name=Reference.Name,Nreads=Depth*Breadth*Total.reference.bases/10000))
+test2<-Reduce(function(...) full_join(...,by="Reference.Name"), test)
+colnames(test2) <- c("Reference.Name",as.character(IDs))
+```
+
+```{r,within_dist,include=FALSE}
+test3<-vegdist(test2[,2:148],method="jaccard",na.rm=TRUE)
+m<-mean(test3[!is.na(test3)]) #0.8820892
+s<-sd(test3[!is.na(test3)]) #0.1969525
+```
+
+## hashMean and simPower
+
+```{r,hashing,include=FALSE}
+unweight_hm<-hashMean(runif(1000,0,1),10,1000,1)
+means<-mclapply(unweight_hm, function(x) (mean(lowerTriDM(calcUJstudy(x)))),mc.cores=4)
+pass_m<-means[which(means < 0.8821 & means>0.8820)] #0.23736 = depth of subsampling
+unweight_hsd<-hashSD(0.23736,otu_number_range=c(10,100,1000,10000),sim_number=100)
+sds<-mclapply(unweight_hsd, function(x) (sd(lowerTriDM(calcUJstudy(x)))), mc.cores=4) 
+pass_s<-sds[which(sds<0.20 & sds>0.19)] #10 for number of OTUs
+```
+
+```{r, simPower}
+sp<-simPower(group_size_vector=c(50,50), otu_number=10, rare_depth=0.23736,effect_range=seq(0,0.3,length.out=100))
+uj<-mclapply(sp,function(x) calcUJstudy(x),mc.cores=4)
+# check if mean & sd is approximately OK
+mclapply(uj, mean, mc.cores=4)
+mclapply(uj, sd, mc.cores=4)
+```
+
+```{r, bootPower}
+bp10<-bootPower(uj, boot_number=100, subject_group_vector=c(10,10),alpha=0.05)
+bp25<-bootPower(uj, boot_number=100, subject_group_vector=c(25,25),alpha=0.05)
+bp50<-bootPower(uj, boot_number=100, subject_group_vector=c(50,50),alpha=0.05)
+write.table(bp,file="boot.txt",row.names = FALSE)
+```
+
+```{r, plot}
+ggplot2::qplot(data=subset(bp50,power>0.2 & power < 0.95),x=log10(power),y=log10(simulated_omega2)) + geom_smooth(method="lm") + ggtitle("Omega2 to Power with 50 Subjects/Group") + xlab("Omega2") + ylab("Power")
+
+ggplot2::qplot(data=subset(bp50,power>0.2 & power < 0.95),x=log10(power),y=log10(simulated_omega2)) + geom_smooth(method="lm") + ggtitle("log10(Omega2) to log10(Power) with 50 Subjects/Group") + xlab("log10(Omega2)") + ylab("log10(Power)")
+
+bp50_model <- subset(bp50, power < 0.95 & power > 0.2)
+bp50_model <- data.frame(log_omega2=log10(bp50_model$simulated_omega2),log_power=log10(bp50_model$power))
+bp50_model <- subset(bp50_model, log_omega2>-Inf)
+bp50_model <- lm(log_omega2 ~ log_power, data=bp50_model)
+10^predict(bp50_model, newdata=data.frame(log_power=log10(0.8))) # 80% power for omega2 of 0.009
+10^predict(bp50_model, newdata=data.frame(log_power = log10(0.9))) # 90% power for omega2 of 0.01379
+```
+
+# References
