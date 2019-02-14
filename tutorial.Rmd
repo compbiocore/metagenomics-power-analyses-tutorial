@@ -30,9 +30,11 @@ install.packages('knitr')
 install.packages('kableExtra')
 install.packages('dplyr')
 install.packages('vegan')
+install.packages('ggplot2')
+install.packages('parallel')
 ```
 
-Afterwards we are going to load the packages we need. We will also set a random seed so as to make the results from this notebook fully reproducible.
+Afterwards we are going to load the packages we need. We will also set a random seed so as to make the results from this notebook fully reproducible. Additionally, we have loaded the package **parallel** to allow us to run operations like `lapply` split up onto multiple cores. If your machine doesn't have multiple cores you can omit the package but everything will take longer so we recommend shortening the number of simulations to get through the tutorial.
 
 ```{r, setup}
 library(micropower)
@@ -40,6 +42,8 @@ library(knitr)
 library(kableExtra)
 library(dplyr)
 library(vegan)
+library(ggplot2)
+library(parallel)
 set.seed(515087345)
 ```
 
@@ -53,7 +57,7 @@ PATH='data'
 
 The analysis consists of the following steps. First, we decide on what distance metric we will be using. For this tutorial we will be using unweighted Jaccard distance, but other metrics are possible as well. Then we find an appropriate dataset, then wrangle the data into the appropriate form. The necessary input for `micropower` is within-group mean and standard deviations. These can be computed using the chosen distance metric from OTU tables. Thus any dataset that is used should either provide within-group mean and standard deviations already, or provide data that can be transformed into an OTU table.
 
-After within-group mean and standard deviations have been computed, 
+After within-group mean and standard deviations have been computed, we will use those to determine the level of subsampling and number of OTUs needed to produce OTU tables with similar properties as the control group.
 
 ## Finding, filtering and transforming the data
 
@@ -81,7 +85,7 @@ The abundance tables from HMP need to be set up so that columns are by sample (S
 ```{r,make_table, warnings=FALSE}
 tsvs<-lapply(IDs, function(x) read.csv(file.path(PATH,paste0(x,'.tsv')),sep='\t') %>% transmute(Reference.Name=Reference.Name,Nreads=Depth*Breadth*Total.reference.bases/10000))
 otu_table<-Reduce(function(...) full_join(...,by="Reference.Name"), test)
-colnames(test2) <- c("Reference.Name",as.character(IDs))
+colnames(otu_table) <- c("Reference.Name",as.character(IDs))
 ```
 
 ## Within-group Jaccard distances
@@ -91,16 +95,27 @@ Now that we have an OTU table we can compute distances. For our tutorial we will
 also allows for Unifrac distances [@Lozupone2005] although you will need to provide an appropriate phylogenetic tree.
 
 ```{r,within_dist}
-jaccard<-vegdist(test2[,2:148],method="jaccard",na.rm=TRUE)
+jaccard<-vegdist(otu_table[,2:148],method="jaccard",na.rm=TRUE)
 m<-mean(jaccard[!is.na(jaccard)]) #0.8820892
 s<-sd(jaccard[!is.na(jaccard)]) #0.1969525
 ```
 
 ## hashMean and simPower
 
-```{r,hashing,include=FALSE}
+Once we have determined population parameters for within-group distances, we now use `hashMean` to simulate a list of OTU tables at different levels of subsampling (`rare_levels`) so that we can determine what level of subsampling produces OTU tables with the same mean pairwise distance. Since we are doing an unweighted analysis, we set `sequence_depth`=1, but if weighted then we would need to decide or determine the sequencing depth as well. Once we have determine the level of subsampling, then we will use `hashSD` to simulate a list of OTU tables at different numbers of OTUs at our specific subsampling level to determine what number of OTUs produces OTU tables with the same standard deviation of pairwise distance. These are the additional parameters that will be used to simulate OTU tables under a range of effect sizes. More on the theory behind this and the validation is available in the paper.
+
+The names of `hashMean` are the levels of subsampling with the index number.
+
+```{r,hashing}
 unweight_hm<-hashMean(rare_levels=runif(1000,0,1),rep_per_level=10,otu_number=1000,sequence_depth=1)
 means<-mclapply(unweight_hm, function(x) (mean(lowerTriDM(calcUJstudy(x)))),mc.cores=4)
+names(means) <- sapply(strsplit(names(means),"_"),FUN=function(x) {x[[1]]})
+mean_df <- data.frame(x=as.numeric(names(means)),y=as.numeric(means))
+qplot(data=mean_df,x=x,y=y) + geom_smooth(method="loess")
+loess <- loess(y~x, data=df)
+subsample <- predict(loess,newdata=data.frame(x=m))
+
+
 pass_m<-means[which(means < 0.8821 & means>0.8820)] #0.23736 = depth of subsampling
 unweight_hsd<-hashSD(0.23736,otu_number_range=c(10,100,1000,10000),sim_number=100)
 sds<-mclapply(unweight_hsd, function(x) (sd(lowerTriDM(calcUJstudy(x)))), mc.cores=4) 
@@ -116,9 +131,9 @@ mclapply(uj, sd, mc.cores=4)
 ```
 
 ```{r, bootPower}
-bp10<-bootPower(uj, boot_number=100, subject_group_vector=c(10,10),alpha=0.05)
-bp25<-bootPower(uj, boot_number=100, subject_group_vector=c(25,25),alpha=0.05)
-bp50<-bootPower(uj, boot_number=100, subject_group_vector=c(50,50),alpha=0.05)
+bp10<-bootPower(uj, boot_number=10, subject_group_vector=c(10,10),alpha=0.05)
+bp25<-bootPower(uj, boot_number=10, subject_group_vector=c(25,25),alpha=0.05)
+bp50<-bootPower(uj, boot_number=10, subject_group_vector=c(50,50),alpha=0.05)
 write.table(bp,file="boot.txt",row.names = FALSE)
 ```
 
