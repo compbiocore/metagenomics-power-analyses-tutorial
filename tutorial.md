@@ -20,9 +20,9 @@ distance matrices.
 
 `micropower` is a great package that I’ve used to perform power analyses
 for researchers wanting to do 16s and whole genome shotgun metagenomics
-experiments. However it comes without a tutorial or much documentation,
-so it’s not entirely clear how to use it. Following is a walkthrough of
-what such an analysis looks like as well as what you will need to
+experiments. However it comes without a tutorial or much documentation - there is a [gist available](https://gist.github.com/brendankelly/6673e8596d3cde3fac7d493d7747aa80) though - 
+so it’s not entirely clear how to use it. Following is a (more in-depth than the gist) walkthrough of
+what such an analysis looks as well as what you will need to
 consider for your own power analysis.
 
 Data
